@@ -29,13 +29,64 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
+    await client.connect();
+
+
+
+    const db = client.db('Asset_Verse_db')
+    const userCollection = db.collection('users')
+
+
+
+
+app.post("/users", async (req, res) => {
+  try {
+    const data = req.body;
+
+    // Common user fields
+    const newUser = {
+      name: data.name,
+      email: data.email,
+      password: data.password, // চাইলে bcrypt করতে পারো
+      role: data.role,
+      userphoto: data.photo || data.photoURL || "", // ← এখানে ফ্রন্টেন্ড থেকে আসা image URL ব্যবহার
+      dateOfBirth: data.dateOfBirth,
+      createdAt: new Date(),
+    };
+
+    // HR হলে অতিরিক্ত fields
+    if (data.role === "hr") {
+      newUser.companyName = data.companyName;
+      newUser.companyLogo = data.companyLogo || "";
+      newUser.subscription = "basic"; // default
+      newUser.packageLimit = 5;
+      newUser.currentEmployees = 0;
+    }
+
+    // Employee হলে অতিরিক্ত fields
+    if (data.role === "employee") {
+      newUser.skills = [];
+      newUser.affiliatedCompanies = [];
+    }
+
+    const result = await userCollection.insertOne(newUser);
+    res.send({ success: true, userId: result.insertedId });
+
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, error: "Internal Server Error" });
+  }
+});
+
+
+
     // Send a ping to confirm a successful connection
+
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
-    await client.close();
+    // await client.close();
   }
 }
 run().catch(console.dir);

@@ -4,6 +4,8 @@ const app = express()
 require('dotenv').config()
 
 const { MongoClient, ServerApiVersion } = require('mongodb');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
+
 const port = process.env.PORT || 3000
 
 app.use(express.json());
@@ -26,6 +28,9 @@ async function run() {
     const db = client.db('Asset_Verse_db');
     const userCollection = db.collection('users');
     const assetsCollection = db.collection("assets");
+    const packageCollection = db.collection("packages");
+    const paymentCollection = db.collection("payments");
+ 
 
     // ------------------------------
     //   CREATE USER (Google + Normal)
@@ -130,6 +135,30 @@ async function run() {
 
           res.send({ role: user.role });
         });
+
+
+
+   // server-এ subscription ফেরত দেওয়ার API  
+
+    app.get("/users/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
+    const user = await userCollection.findOne({ email });
+
+    if (!user) {
+      return res.status(404).send({ success: false, message: "User not found" });
+    }
+
+    res.send({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, message: "Server error" });
+  }
+});
 
 
 
@@ -287,6 +316,159 @@ app.delete("/employees/:id", async (req, res) => {
     res.status(500).send({ success: false, error: "Failed to delete employee" });
   }
 });
+
+
+
+app.get("/packages", async (req, res) => {
+  try {
+    const packages = await db.collection("packages").find().toArray();
+    res.send(packages);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, error: "Failed to fetch packages" });
+  }
+});
+
+
+
+    //   -----------------
+     // payment Section api
+    // -------------------
+
+app.post('/create-checkout-session', async (req, res) => {
+  const { packageId, packageName, price } = req.body;
+  
+  try {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: { name: packageName },
+            unit_amount: price * 100,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'payment',
+      success_url: `http://localhost:5173/dashboard/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `http://localhost:5173/dashboard/cancel`,
+    });
+    
+    res.send({ url: session.url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ error: 'Failed to create checkout session' });
+  }
+});
+
+app.post('/payment-success', async (req, res) => {
+  const { sessionId, hrEmail, packageId, packageName, amount } = req.body;
+  
+  console.log('📦 Received payment data:', { sessionId, hrEmail, packageId, packageName, amount });
+  
+  try {
+    // Validate required fields
+    if (!sessionId || !hrEmail || !packageId || !packageName || !amount) {
+      console.error('❌ Missing fields:', { sessionId, hrEmail, packageId, packageName, amount });
+      return res.status(400).send({ 
+        success: false, 
+        error: 'Missing required fields' 
+      });
+    }
+
+    // Check if payment already exists (prevent duplicates)
+    const existingPayment = await paymentCollection.findOne({ stripeSessionId: sessionId });
+    
+    if (existingPayment) {
+      console.log('⚠️ Payment already recorded');
+      return res.send({ 
+        success: true, 
+        message: 'Payment already recorded',
+        paymentId: existingPayment._id 
+      });
+    }
+
+    // Fetch package details from database
+    const packageDetails = await packageCollection.findOne({ _id: new ObjectId(packageId) });
+    
+    if (!packageDetails) {
+      console.error('❌ Package not found:', packageId);
+      return res.status(404).send({ 
+        success: false, 
+        error: 'Package not found in database' 
+      });
+    }
+
+    console.log('✅ Package found:', packageDetails);
+
+    // Save payment record
+    const paymentData = {
+      hrEmail,
+      packageId,
+      packageName,
+      amount: parseFloat(amount),
+      currency: 'USD',
+      paymentStatus: 'paid',
+      paymentMethod: 'stripe',
+      stripeSessionId: sessionId,
+      paidAt: new Date()
+    };
+    
+    const paymentResult = await paymentCollection.insertOne(paymentData);
+    console.log('✅ Payment saved:', paymentResult.insertedId);
+    
+    // Update user subscription
+    const updateResult = await userCollection.updateOne(
+      { email: hrEmail },
+      { 
+        $set: { 
+          subscription: packageDetails.name.toLowerCase(), // 'basic', 'standard', 'premium'
+          packageLimit: packageDetails.packageLimit, // 5, 10, or 20
+          subscriptionStartDate: new Date(),
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (updateResult.matchedCount === 0) {
+      console.error('❌ User not found:', hrEmail);
+      return res.status(404).send({ 
+        success: false, 
+        error: 'User not found with this email' 
+      });
+    }
+
+    console.log('✅ User subscription updated for:', hrEmail);
+
+    res.send({ 
+      success: true, 
+      paymentId: paymentResult.insertedId,
+      message: 'Payment recorded and subscription updated successfully',
+      subscriptionDetails: {
+        packageName: packageDetails.name,
+        packageLimit: packageDetails.packageLimit,
+        features: packageDetails.features
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ Payment save error:', err);
+    res.status(500).send({ 
+      success: false, 
+      error: 'Failed to save payment',
+      details: err.message 
+    });
+  }
+});
+
+
+
+
+
+
+
 
 
 

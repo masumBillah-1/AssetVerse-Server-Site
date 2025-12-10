@@ -25,6 +25,7 @@ async function run() {
 
     const db = client.db('Asset_Verse_db');
     const userCollection = db.collection('users');
+    const assetsCollection = db.collection("assets");
 
     // ------------------------------
     //   CREATE USER (Google + Normal)
@@ -160,6 +161,136 @@ async function run() {
         res.json({ found: false });
       }
     });
+
+
+      // Add Assets api 
+
+
+ app.post("/assets", async (req, res) => {
+  try {
+    const asset = req.body;
+
+    if (!asset.assetName || !asset.assetType || !asset.quantity || !asset.returnType || !asset.addedBy?.email) {
+      return res.status(400).send({ success: false, error: "Missing required fields" });
+    }
+
+    // MongoDB থেকে user খুঁজে পাওয়া
+    const user = await userCollection.findOne({ email: asset.addedBy.email });
+
+    if (!user) return res.status(404).send({ success: false, error: "User not found" });
+
+    const newAsset = {
+      assetName: asset.assetName,
+      assetType: asset.assetType,
+      quantity: Number(asset.quantity),
+      assetImage: asset.assetImage || "",
+      returnType: asset.returnType,
+      status: "available",
+      addedAt: new Date(),
+      addedBy: {
+        uid: user._id,   // MongoDB _id
+        name: user.name,
+        email: user.email,
+      },
+    };
+
+    const result = await assetsCollection.insertOne(newAsset);
+    res.send({ success: true, id: result.insertedId });
+
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, error: "Failed to add asset" });
+  }
+});
+
+
+
+
+    app.get("/assets", async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.returnType) {
+      filter.returnType = req.query.returnType; // optional query filter
+    }
+
+    const result = await assetsCollection.find(filter).sort({ addedAt: -1 }).toArray();
+    res.send(result);
+  } catch (err) {
+    console.log(err);
+    res.status(500).send({ success: false, error: "Failed to fetch assets" });
+  }
+});
+
+const { ObjectId } = require('mongodb');
+
+app.delete("/assets/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const result = await assetsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount > 0) {
+      res.send({ success: true, message: "Asset deleted successfully" });
+    } else {
+      res.status(404).send({ success: false, message: "Asset not found" });
+    }
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, message: "Failed to delete asset" });
+  }
+});
+
+
+app.patch("/assets/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const data = req.body;
+
+    const result = await assetsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: data }
+    );
+
+    if (result.modifiedCount > 0) {
+      res.send({ success: true, message: "Asset updated successfully" });
+    } else {
+      res.status(404).send({ success: false, message: "Asset not found or no changes made" });
+    }
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, message: "Failed to update asset" });
+  }
+});
+
+// --------------------------------------
+//  GET only employees
+// --------------------------------------
+
+app.get("/employees", async (req, res) => {
+  try {
+    const result = await userCollection.find({ role: "employee" }).toArray();
+    res.send(result);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, error: "Failed to fetch employees" });
+  }
+});
+
+app.delete("/employees/:id", async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
+
+    res.send(result);
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, error: "Failed to delete employee" });
+  }
+});
+
+
+
+
 
     await client.db("admin").command({ ping: 1 });
     console.log("Connected to MongoDB!");

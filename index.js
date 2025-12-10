@@ -120,6 +120,17 @@ async function run() {
     });
 
 
+    // GET user role by email
+        app.get('/users/:email/role', async (req, res) => {
+          const email = req.params.email;
+          const user = await userCollection.findOne({ email });
+
+          if (!user) return res.status(404).send({ success: false, message: "User not found" });
+
+          res.send({ role: user.role });
+        });
+
+
 
 
 

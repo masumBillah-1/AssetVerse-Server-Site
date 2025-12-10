@@ -419,18 +419,25 @@ app.post('/payment-success', async (req, res) => {
     const paymentResult = await paymentCollection.insertOne(paymentData);
     console.log('✅ Payment saved:', paymentResult.insertedId);
     
-    // Update user subscription
-    const updateResult = await userCollection.updateOne(
-      { email: hrEmail },
-      { 
-        $set: { 
-          subscription: packageDetails.name.toLowerCase(), // 'basic', 'standard', 'premium'
-          packageLimit: packageDetails.packageLimit, // 5, 10, or 20
-          subscriptionStartDate: new Date(),
-          updatedAt: new Date()
-        } 
+   // Update user subscription + push to subscriptionHistory
+const updateResult = await userCollection.updateOne(
+  { email: hrEmail },
+  { 
+    $set: { 
+      subscription: packageDetails.name.toLowerCase(), // latest package
+      packageLimit: packageDetails.packageLimit,
+      subscriptionStartDate: new Date(),
+      updatedAt: new Date()
+    },
+    $push: { // sequential purchase history
+      subscriptionHistory: {
+        packageName: packageDetails.name,
+        amount: parseFloat(amount),
+        date: new Date()
       }
-    );
+    }
+  }
+);
 
     if (updateResult.matchedCount === 0) {
       console.error('❌ User not found:', hrEmail);

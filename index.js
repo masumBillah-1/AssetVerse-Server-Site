@@ -30,6 +30,7 @@ async function run() {
     const assetsCollection = db.collection("assets");
     const packageCollection = db.collection("packages");
     const paymentCollection = db.collection("payments");
+    const requestsCollection = db.collection("requests");
  
 
     // ------------------------------
@@ -318,6 +319,61 @@ app.delete("/employees/:id", async (req, res) => {
 });
 
 
+
+  // employee assets Request api 
+
+
+app.post("/requests", async (req, res) => {
+  try {
+    const requestData = req.body;
+    requestData.requestStatus = "pending";
+    requestData.requestDate = new Date();
+
+    const saved = await requestsCollection.insertOne(requestData);
+    res.send(saved);
+  } catch (error) {
+    res.status(500).send({ error: "Failed to create request" });
+  }
+});
+
+
+// Get requests by employee email
+app.get("/requests", async (req, res) => {
+  try {
+    const { employeeEmail } = req.query;
+    const filter = employeeEmail ? { employeeEmail } : {};
+    const result = await requestsCollection.find(filter).sort({ requestDate: -1 }).toArray();
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: "Failed to fetch requests" });
+  }
+});
+
+// Update request (for return)
+app.patch("/requests/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const data = req.body;
+    const result = await requestsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: data }
+    );
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: "Failed to update request" });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+  // package api call 
 
 app.get("/packages", async (req, res) => {
   try {

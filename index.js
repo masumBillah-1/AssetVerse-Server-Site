@@ -31,6 +31,7 @@ async function run() {
     const packageCollection = db.collection("packages");
     const paymentCollection = db.collection("payments");
     const requestsCollection = db.collection("requests");
+    const notificationsCollection = db.collection("notifications");
  
 
     // ------------------------------
@@ -194,9 +195,8 @@ async function run() {
 
 
       // Add Assets api 
-
-
- app.post("/assets", async (req, res) => {
+// Add Assets api - UPDATED FOR MULTI-USER NOTIFICATIONS
+app.post("/assets", async (req, res) => {
   try {
     const asset = req.body;
 
@@ -204,10 +204,24 @@ async function run() {
       return res.status(400).send({ success: false, error: "Missing required fields" });
     }
 
-    // MongoDB থেকে user খুঁজে পাওয়া
+    // Find the user who is adding the asset
     const user = await userCollection.findOne({ email: asset.addedBy.email });
-
     if (!user) return res.status(404).send({ success: false, error: "User not found" });
+
+    // ✅ Determine company email
+    let companyEmail;
+    if (user.role === "hr") {
+      companyEmail = user.email; // HR এর email = company identifier
+    } else if (user.role === "employee") {
+      companyEmail = user.affiliatedCompanies?.[0]; // Employee এর company
+    }
+
+    if (!companyEmail) {
+      return res.status(400).send({ 
+        success: false, 
+        error: "Company email not found. Employee must be affiliated with a company." 
+      });
+    }
 
     const newAsset = {
       assetName: asset.assetName,
@@ -218,20 +232,179 @@ async function run() {
       status: "available",
       addedAt: new Date(),
       addedBy: {
-        uid: user._id,   // MongoDB _id
+        uid: user._id,
         name: user.name,
         email: user.email,
       },
+      companyEmail: companyEmail
     };
 
+    // Insert asset
     const result = await assetsCollection.insertOne(newAsset);
-    res.send({ success: true, id: result.insertedId });
+
+    // ✅ Find ALL users in the same company
+    let companyMembers = [];
+    
+    if (user.role === "hr") {
+      // HR হলে: HR নিজে + তার সব employees
+      companyMembers = await userCollection.find({
+        $or: [
+          { email: user.email, role: "hr" },
+          { affiliatedCompanies: user.email, role: "employee" }
+        ]
+      }).toArray();
+    } else if (user.role === "employee") {
+      // Employee হলে: সেই company এর HR + সব employees
+      companyMembers = await userCollection.find({
+        $or: [
+          { email: companyEmail, role: "hr" },
+          { affiliatedCompanies: companyEmail, role: "employee" }
+        ]
+      }).toArray();
+    }
+
+    console.log(`✅ Found ${companyMembers.length} members in company: ${companyEmail}`);
+
+    // ✅ প্রতিটি company member এর জন্য আলাদা notification
+    const notifications = companyMembers.map(member => ({
+      userId: member._id,
+      assetId: result.insertedId,
+      message: `${user.name} added a new asset: ${newAsset.assetName}`,
+      date: new Date(),
+      readBy: [],
+      companyEmail: companyEmail,
+      notificationType: "asset_added"
+    }));
+
+    // ✅ সব notifications insert করুন
+    if (notifications.length > 0) {
+      await notificationsCollection.insertMany(notifications);
+      console.log(`✅ Created ${notifications.length} notifications for company: ${companyEmail}`);
+    }
+
+    res.send({ 
+      success: true, 
+      id: result.insertedId, 
+      notificationsCreated: notifications.length,
+      companyEmail: companyEmail
+    });
 
   } catch (error) {
-    console.log(error);
+    console.error("❌ Asset add error:", error);
     res.status(500).send({ success: false, error: "Failed to add asset" });
   }
 });
+
+
+// notifications  api 
+app.get("/notifications/:userId", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Find user to get their company info
+    const user = await userCollection.findOne({ _id: new ObjectId(userId) });
+    
+    if (!user) {
+      return res.status(404).send({ success: false, error: "User not found" });
+    }
+
+    let notifications;
+
+    if (user.role === "hr") {
+      // HR দেখবে: তাদের company এর সব notifications
+      notifications = await notificationsCollection
+        .find({ 
+          $or: [
+            { userId: new ObjectId(userId) }, // নিজের notifications
+            { companyEmail: user.email } // তাদের company এর সব notifications
+          ]
+        })
+        .sort({ date: -1 })
+        .toArray();
+    } else {
+      // Employee দেখবে: শুধু নিজের notifications
+      notifications = await notificationsCollection
+        .find({ userId: new ObjectId(userId) })
+        .sort({ date: -1 })
+        .toArray();
+    }
+
+    // ✅ প্রতিটি notification এ check করুন এই user এর জন্য read কিনা
+    const notificationsWithReadStatus = notifications.map(notif => ({
+      ...notif,
+      read: notif.readBy?.some(id => id.toString() === userId.toString()) || false
+    }));
+
+    res.send({ success: true, notifications: notificationsWithReadStatus });
+
+  } catch (err) {
+    console.error("❌ Notification fetch error:", err);
+    res.status(500).send({ success: false, error: "Failed to fetch notifications" });
+  }
+});
+
+
+app.patch("/notifications/:id/read", async (req, res) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.body.userId; // Frontend থেকে userId পাঠাতে হবে
+
+    if (!userId) {
+      return res.status(400).send({ success: false, error: "userId is required" });
+    }
+
+    // ✅ readBy array তে এই userId add করুন (duplicate avoid করতে $addToSet)
+    const result = await notificationsCollection.updateOne(
+      { _id: new ObjectId(notificationId) },
+      { $addToSet: { readBy: new ObjectId(userId) } }
+    );
+
+    if (result.modifiedCount > 0 || result.matchedCount > 0) {
+      res.send({ success: true, message: "Notification marked as read for this user" });
+    } else {
+      res.status(404).send({ success: false, message: "Notification not found" });
+    }
+  } catch (err) {
+    console.error("❌ Notification update error:", err);
+    res.status(500).send({ success: false, error: "Failed to update notification" });
+  }
+});
+
+//  ===================================
+// OPTIONAL: Bulk mark as read
+// ===================================
+app.patch("/notifications/mark-all-read", async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).send({ success: false, error: "userId is required" });
+    }
+
+    // সব notifications এ এই user কে readBy তে add করুন
+    const result = await notificationsCollection.updateMany(
+      { readBy: { $ne: new ObjectId(userId) } }, // যেগুলো এখনো read করেনি
+      { $addToSet: { readBy: new ObjectId(userId) } }
+    );
+
+    res.send({ 
+      success: true, 
+      message: `${result.modifiedCount} notifications marked as read` 
+    });
+
+  } catch (err) {
+    console.error("❌ Bulk read error:", err);
+    res.status(500).send({ success: false, error: "Failed to mark all as read" });
+  }
+});
+
+
+
+
+
+
+
+
 
 
 
@@ -361,6 +534,106 @@ app.patch("/requests/:id", async (req, res) => {
     res.send(result);
   } catch (error) {
     res.status(500).send({ error: "Failed to update request" });
+  }
+});
+
+// ✅ নতুন route - এখানে add করুন
+app.patch("/requests/:id/approve", async (req, res) => {
+  try {
+    const requestId = req.params.id;
+    
+    // Get the request details
+    const request = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
+    
+    if (!request) {
+      return res.status(404).send({ success: false, message: "Request not found" });
+    }
+
+    // Get the employee details
+    const employee = await userCollection.findOne({ email: request.employeeEmail });
+    
+    if (!employee) {
+      return res.status(404).send({ success: false, message: "Employee not found" });
+    }
+
+    // Get the asset to find HR's company email
+    const asset = await assetsCollection.findOne({ _id: new ObjectId(request.assetId) });
+    
+    if (!asset) {
+      return res.status(404).send({ success: false, message: "Asset not found" });
+    }
+
+    const hrCompanyEmail = asset.companyEmail || asset.addedBy?.email;
+
+    // ✅ Validation এখানে হবে - approve করার আগে
+    if (!hrCompanyEmail) {
+      return res.status(400).send({ 
+        success: false, 
+        message: "Company email not found in asset" 
+      });
+    }
+
+    // Update request status to approved
+    await requestsCollection.updateOne(
+      { _id: new ObjectId(requestId) },
+      { 
+        $set: { 
+          requestStatus: 'approved',
+          approvedAt: new Date()
+        }
+      }
+    );
+
+    // ✅ Add HR's company email to employee's affiliatedCompanies
+    const updateResult = await userCollection.updateOne(
+      { email: request.employeeEmail },
+      { 
+        $addToSet: { 
+          affiliatedCompanies: hrCompanyEmail 
+        }
+      }
+    );
+
+    // Optional: Decrease asset quantity by 1
+    await assetsCollection.updateOne(
+      { _id: new ObjectId(request.assetId) },
+      { $inc: { quantity: -1 } }
+    );
+
+    res.send({ 
+      success: true, 
+      message: "Request approved and employee affiliated with company",
+      affiliationUpdated: updateResult.modifiedCount > 0
+    });
+
+  } catch (error) {
+    console.error("❌ Approve request error:", error);
+    res.status(500).send({ success: false, error: "Failed to approve request" });
+  }
+});
+
+
+
+
+// Get Pending Requests Count
+app.get("/requests/pending-count", async (req, res) => {
+  try {
+    const count = await requestsCollection.countDocuments({ requestStatus: "pending" });
+    res.send({ success: true, pending: count });
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ success: false, error: "Failed to get pending count" });
+  }
+});
+
+// / GET approved/assigned requests count
+app.get("/requests/assigned-count", async (req, res) => {
+  try {
+    const count = await requestsCollection.countDocuments({ requestStatus: "approved" });
+    res.send({ assigned: count });
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ error: "Failed to fetch assigned count" });
   }
 });
 

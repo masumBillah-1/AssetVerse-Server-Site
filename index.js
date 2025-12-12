@@ -802,6 +802,231 @@ const updateResult = await userCollection.updateOne(
 
 
 
+// ===================================
+// GET ALL EMPLOYEES OF A COMPANY (FOR MY TEAM PAGE)
+// ===================================
+app.get("/employees/company/:hrEmail", async (req, res) => {
+  try {
+    const hrEmail = req.params.hrEmail;
+
+    // Find all employees affiliated with this HR
+    const employees = await userCollection.find({
+      role: "employee",
+      affiliatedCompanies: hrEmail
+    }).toArray();
+
+    res.send({ 
+      success: true, 
+      employees,
+      count: employees.length 
+    });
+
+  } catch (error) {
+    console.error("❌ Fetch employees error:", error);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to fetch employees" 
+    });
+  }
+});
+
+// ===================================
+// MANUALLY ASSIGN EMPLOYEES TO CORRECT HR
+// ===================================
+app.post("/employees/assign-to-hr", async (req, res) => {
+  try {
+    const { assignments } = req.body;
+    // assignments format: [{ employeeEmail: "...", hrEmail: "..." }, ...]
+
+    if (!assignments || !Array.isArray(assignments)) {
+      return res.status(400).send({ 
+        success: false, 
+        error: "assignments array is required" 
+      });
+    }
+
+    const results = [];
+
+    for (const assignment of assignments) {
+      const { employeeEmail, hrEmail } = assignment;
+
+      // Verify HR exists
+      const hr = await userCollection.findOne({ email: hrEmail, role: "hr" });
+      if (!hr) {
+        results.push({ 
+          employeeEmail, 
+          success: false, 
+          error: "HR not found" 
+        });
+        continue;
+      }
+
+      // Verify Employee exists
+      const employee = await userCollection.findOne({ 
+        email: employeeEmail, 
+        role: "employee" 
+      });
+      
+      if (!employee) {
+        results.push({ 
+          employeeEmail, 
+          success: false, 
+          error: "Employee not found" 
+        });
+        continue;
+      }
+
+      // Update employee's affiliatedCompanies
+      await userCollection.updateOne(
+        { email: employeeEmail },
+        { 
+          $set: { 
+            affiliatedCompanies: [hrEmail],
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      results.push({ 
+        employeeEmail, 
+        hrEmail,
+        success: true, 
+        message: `${employee.name} assigned to ${hr.companyName}` 
+      });
+    }
+
+    // Update each HR's currentEmployees count
+    const hrEmails = [...new Set(assignments.map(a => a.hrEmail))];
+    
+    for (const hrEmail of hrEmails) {
+      const employeeCount = await userCollection.countDocuments({
+        role: "employee",
+        affiliatedCompanies: hrEmail
+      });
+
+      await userCollection.updateOne(
+        { email: hrEmail },
+        { 
+          $set: { 
+            currentEmployees: employeeCount,
+            updatedAt: new Date()
+          }
+        }
+      );
+    }
+
+    res.send({ 
+      success: true, 
+      results,
+      totalProcessed: assignments.length
+    });
+
+  } catch (error) {
+    console.error("❌ Assign employees error:", error);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to assign employees" 
+    });
+  }
+});
+
+// ===================================
+// GET ALL HRs AND THEIR COMPANIES
+// ===================================
+app.get("/hrs", async (req, res) => {
+  try {
+    const hrs = await userCollection.find({ role: "hr" }).toArray();
+
+    const hrList = await Promise.all(
+      hrs.map(async (hr) => {
+        const employeeCount = await userCollection.countDocuments({
+          role: "employee",
+          affiliatedCompanies: hr.email
+        });
+
+        return {
+          _id: hr._id,
+          name: hr.name,
+          email: hr.email,
+          companyName: hr.companyName,
+          companyLogo: hr.companyLogo,
+          currentEmployees: employeeCount,
+          packageLimit: hr.packageLimit,
+          subscription: hr.subscription
+        };
+      })
+    );
+
+    res.send({ 
+      success: true, 
+      hrs: hrList,
+      totalCompanies: hrList.length
+    });
+
+  } catch (error) {
+    console.error("❌ Get HRs error:", error);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to fetch HRs" 
+    });
+  }
+});
+
+// ===================================
+// VIEW ALL EMPLOYEES WITH THEIR COMPANIES
+// ===================================
+app.get("/employees/with-companies", async (req, res) => {
+  try {
+    const employees = await userCollection.find({ role: "employee" }).toArray();
+
+    const employeeList = await Promise.all(
+      employees.map(async (emp) => {
+        const companies = [];
+        
+        if (emp.affiliatedCompanies && emp.affiliatedCompanies.length > 0) {
+          for (const hrEmail of emp.affiliatedCompanies) {
+            const hr = await userCollection.findOne({ 
+              email: hrEmail, 
+              role: "hr" 
+            });
+            
+            if (hr) {
+              companies.push({
+                hrEmail: hr.email,
+                companyName: hr.companyName
+              });
+            }
+          }
+        }
+
+        return {
+          _id: emp._id,
+          name: emp.name,
+          email: emp.email,
+          photoURL: emp.photoURL,
+          affiliatedCompanies: companies,
+          hasCompany: companies.length > 0
+        };
+      })
+    );
+
+    res.send({ 
+      success: true, 
+      employees: employeeList,
+      totalEmployees: employeeList.length,
+      employeesWithCompany: employeeList.filter(e => e.hasCompany).length,
+      employeesWithoutCompany: employeeList.filter(e => !e.hasCompany).length
+    });
+
+  } catch (error) {
+    console.error("❌ Get employees error:", error);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to fetch employees" 
+    });
+  }
+});
+
 
 
 

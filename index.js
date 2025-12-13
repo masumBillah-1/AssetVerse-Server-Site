@@ -194,8 +194,54 @@ async function run() {
     });
 
 
+        // my team member api 
+
+        // ===================================
+// GET USER BY _ID (for fetching HR by companyId)
+// ===================================
+app.get("/users/by-id/:userId", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).send({ 
+        success: false, 
+        error: "Invalid user ID" 
+      });
+    }
+
+    const user = await userCollection.findOne({ _id: new ObjectId(userId) });
+
+    if (!user) {
+      return res.status(404).send({ 
+        success: false, 
+        message: "User not found" 
+      });
+    }
+
+    res.send({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.error('Error fetching user by ID:', error);
+    res.status(500).send({ 
+      success: false, 
+      message: "Server error" 
+    });
+  }
+});
+
+
+
+
+
+
+
       // Add Assets api 
 // Add Assets api - UPDATED FOR MULTI-USER NOTIFICATIONS
+// ✅ Add Assets - Create notifications for ALL company members
 app.post("/assets", async (req, res) => {
   try {
     const asset = req.body;
@@ -208,18 +254,18 @@ app.post("/assets", async (req, res) => {
     const user = await userCollection.findOne({ email: asset.addedBy.email });
     if (!user) return res.status(404).send({ success: false, error: "User not found" });
 
-    // ✅ Determine company email
-    let companyEmail;
+    // ✅ Determine company identifier (HR's _id)
+    let companyId;
     if (user.role === "hr") {
-      companyEmail = user.email; // HR এর email = company identifier
+      companyId = user._id.toString(); // HR এর _id = company identifier
     } else if (user.role === "employee") {
-      companyEmail = user.affiliatedCompanies?.[0]; // Employee এর company
+      companyId = user.affiliatedCompanies?.[0]; // Employee এর company ID
     }
 
-    if (!companyEmail) {
+    if (!companyId) {
       return res.status(400).send({ 
         success: false, 
-        error: "Company email not found. Employee must be affiliated with a company." 
+        error: "Company ID not found. Employee must be affiliated with a company." 
       });
     }
 
@@ -236,7 +282,7 @@ app.post("/assets", async (req, res) => {
         name: user.name,
         email: user.email,
       },
-      companyEmail: companyEmail
+      companyId: companyId // ✅ Store company ID instead of email
     };
 
     // Insert asset
@@ -247,23 +293,29 @@ app.post("/assets", async (req, res) => {
     
     if (user.role === "hr") {
       // HR হলে: HR নিজে + তার সব employees
-      companyMembers = await userCollection.find({
-        $or: [
-          { email: user.email, role: "hr" },
-          { affiliatedCompanies: user.email, role: "employee" }
-        ]
+      const employees = await userCollection.find({
+        role: "employee",
+        affiliatedCompanies: user._id.toString()
       }).toArray();
+
+      companyMembers = [user, ...employees]; // HR + employees
+      
     } else if (user.role === "employee") {
       // Employee হলে: সেই company এর HR + সব employees
-      companyMembers = await userCollection.find({
-        $or: [
-          { email: companyEmail, role: "hr" },
-          { affiliatedCompanies: companyEmail, role: "employee" }
-        ]
+      const hr = await userCollection.findOne({ 
+        _id: new ObjectId(companyId),
+        role: "hr" 
+      });
+
+      const employees = await userCollection.find({
+        role: "employee",
+        affiliatedCompanies: companyId
       }).toArray();
+
+      companyMembers = hr ? [hr, ...employees] : employees;
     }
 
-    console.log(`✅ Found ${companyMembers.length} members in company: ${companyEmail}`);
+    console.log(`✅ Found ${companyMembers.length} members in company: ${companyId}`);
 
     // ✅ প্রতিটি company member এর জন্য আলাদা notification
     const notifications = companyMembers.map(member => ({
@@ -272,21 +324,21 @@ app.post("/assets", async (req, res) => {
       message: `${user.name} added a new asset: ${newAsset.assetName}`,
       date: new Date(),
       readBy: [],
-      companyEmail: companyEmail,
+      companyId: companyId,
       notificationType: "asset_added"
     }));
 
     // ✅ সব notifications insert করুন
     if (notifications.length > 0) {
       await notificationsCollection.insertMany(notifications);
-      console.log(`✅ Created ${notifications.length} notifications for company: ${companyEmail}`);
+      console.log(`✅ Created ${notifications.length} notifications for company: ${companyId}`);
     }
 
     res.send({ 
       success: true, 
       id: result.insertedId, 
       notificationsCreated: notifications.length,
-      companyEmail: companyEmail
+      companyId: companyId
     });
 
   } catch (error) {
@@ -297,37 +349,23 @@ app.post("/assets", async (req, res) => {
 
 
 // notifications  api 
+// ✅ Get notifications - Now uses company ID
 app.get("/notifications/:userId", async (req, res) => {
   try {
     const userId = req.params.userId;
     
-    // Find user to get their company info
+    // Find user to get their info
     const user = await userCollection.findOne({ _id: new ObjectId(userId) });
     
     if (!user) {
       return res.status(404).send({ success: false, error: "User not found" });
     }
 
-    let notifications;
-
-    if (user.role === "hr") {
-      // HR দেখবে: তাদের company এর সব notifications
-      notifications = await notificationsCollection
-        .find({ 
-          $or: [
-            { userId: new ObjectId(userId) }, // নিজের notifications
-            { companyEmail: user.email } // তাদের company এর সব notifications
-          ]
-        })
-        .sort({ date: -1 })
-        .toArray();
-    } else {
-      // Employee দেখবে: শুধু নিজের notifications
-      notifications = await notificationsCollection
-        .find({ userId: new ObjectId(userId) })
-        .sort({ date: -1 })
-        .toArray();
-    }
+    // ✅ Fetch notifications for this specific user
+    const notifications = await notificationsCollection
+      .find({ userId: new ObjectId(userId) })
+      .sort({ date: -1 })
+      .toArray();
 
     // ✅ প্রতিটি notification এ check করুন এই user এর জন্য read কিনা
     const notificationsWithReadStatus = notifications.map(notif => ({
@@ -335,43 +373,89 @@ app.get("/notifications/:userId", async (req, res) => {
       read: notif.readBy?.some(id => id.toString() === userId.toString()) || false
     }));
 
-    res.send({ success: true, notifications: notificationsWithReadStatus });
+    res.send({ 
+      success: true, 
+      notifications: notificationsWithReadStatus 
+    });
 
   } catch (err) {
     console.error("❌ Notification fetch error:", err);
     res.status(500).send({ success: false, error: "Failed to fetch notifications" });
   }
 });
-
-
+// ===================================
+// MARK SINGLE NOTIFICATION AS READ
+// ===================================
 app.patch("/notifications/:id/read", async (req, res) => {
   try {
     const notificationId = req.params.id;
-    const userId = req.body.userId; // Frontend থেকে userId পাঠাতে হবে
+    const userId = req.body.userId;
 
     if (!userId) {
       return res.status(400).send({ success: false, error: "userId is required" });
     }
 
-    // ✅ readBy array তে এই userId add করুন (duplicate avoid করতে $addToSet)
+    // Validate notificationId format
+    if (!ObjectId.isValid(notificationId)) {
+      return res.status(400).send({ success: false, error: "Invalid notification ID" });
+    }
+
+    // ✅ Check if notification exists and belongs to this user
+    const notification = await notificationsCollection.findOne({ 
+      _id: new ObjectId(notificationId),
+      userId: new ObjectId(userId)
+    });
+
+    if (!notification) {
+      return res.status(404).send({ 
+        success: false, 
+        error: "Notification not found or unauthorized" 
+      });
+    }
+
+    // ✅ Check if already read by this user
+    const alreadyRead = notification.readBy?.some(
+      id => id.toString() === userId.toString()
+    );
+
+    if (alreadyRead) {
+      return res.send({ 
+        success: true, 
+        message: "Notification already marked as read",
+        alreadyRead: true
+      });
+    }
+
+    // ✅ Add userId to readBy array
     const result = await notificationsCollection.updateOne(
       { _id: new ObjectId(notificationId) },
       { $addToSet: { readBy: new ObjectId(userId) } }
     );
 
-    if (result.modifiedCount > 0 || result.matchedCount > 0) {
-      res.send({ success: true, message: "Notification marked as read for this user" });
+    if (result.modifiedCount > 0) {
+      res.send({ 
+        success: true, 
+        message: "Notification marked as read",
+        alreadyRead: false
+      });
     } else {
-      res.status(404).send({ success: false, message: "Notification not found" });
+      res.status(500).send({ 
+        success: false, 
+        error: "Failed to update notification" 
+      });
     }
+
   } catch (err) {
-    console.error("❌ Notification update error:", err);
-    res.status(500).send({ success: false, error: "Failed to update notification" });
+    console.error("❌ Notification read error:", err);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to mark notification as read" 
+    });
   }
 });
 
-//  ===================================
-// OPTIONAL: Bulk mark as read
+// ===================================
+// MARK ALL NOTIFICATIONS AS READ
 // ===================================
 app.patch("/notifications/mark-all-read", async (req, res) => {
   try {
@@ -381,20 +465,286 @@ app.patch("/notifications/mark-all-read", async (req, res) => {
       return res.status(400).send({ success: false, error: "userId is required" });
     }
 
-    // সব notifications এ এই user কে readBy তে add করুন
+    // Validate userId format
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).send({ success: false, error: "Invalid user ID" });
+    }
+
+    // ✅ Mark all notifications for THIS USER as read
     const result = await notificationsCollection.updateMany(
-      { readBy: { $ne: new ObjectId(userId) } }, // যেগুলো এখনো read করেনি
+      { 
+        userId: new ObjectId(userId), // Only this user's notifications
+        readBy: { $ne: new ObjectId(userId) } // Not already read
+      },
       { $addToSet: { readBy: new ObjectId(userId) } }
     );
 
     res.send({ 
       success: true, 
-      message: `${result.modifiedCount} notifications marked as read` 
+      message: `${result.modifiedCount} notifications marked as read`,
+      totalMarked: result.modifiedCount
     });
 
   } catch (err) {
     console.error("❌ Bulk read error:", err);
-    res.status(500).send({ success: false, error: "Failed to mark all as read" });
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to mark all as read" 
+    });
+  }
+});
+
+// ===================================
+// GET UNREAD NOTIFICATION COUNT
+// ===================================
+app.get("/notifications/:userId/unread-count", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).send({ success: false, error: "Invalid user ID" });
+    }
+
+    const count = await notificationsCollection.countDocuments({
+      userId: new ObjectId(userId),
+      $or: [
+        { readBy: { $exists: false } },
+        { readBy: { $size: 0 } },
+        { readBy: { $ne: new ObjectId(userId) } }
+      ]
+    });
+
+    res.send({ 
+      success: true, 
+      unreadCount: count 
+    });
+
+  } catch (err) {
+    console.error("❌ Unread count error:", err);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to get unread count" 
+    });
+  }
+});
+
+// ===================================
+// DELETE NOTIFICATION (OPTIONAL)
+// ===================================
+app.delete("/notifications/:id", async (req, res) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.body.userId; // Or from JWT token
+
+    if (!userId) {
+      return res.status(400).send({ success: false, error: "userId is required" });
+    }
+
+    if (!ObjectId.isValid(notificationId)) {
+      return res.status(400).send({ success: false, error: "Invalid notification ID" });
+    }
+
+    // ✅ Only allow users to delete their own notifications
+    const result = await notificationsCollection.deleteOne({
+      _id: new ObjectId(notificationId),
+      userId: new ObjectId(userId)
+    });
+
+    if (result.deletedCount > 0) {
+      res.send({ 
+        success: true, 
+        message: "Notification deleted successfully" 
+      });
+    } else {
+      res.status(404).send({ 
+        success: false, 
+        error: "Notification not found or unauthorized" 
+      });
+    }
+
+  } catch (err) {
+    console.error("❌ Delete notification error:", err);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to delete notification" 
+    });
+  }
+});
+
+// ===================================
+// CLEAR ALL READ NOTIFICATIONS
+// ===================================
+app.delete("/notifications/clear-read", async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).send({ success: false, error: "userId is required" });
+    }
+
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).send({ success: false, error: "Invalid user ID" });
+    }
+
+    // ✅ Delete all read notifications for this user
+    const result = await notificationsCollection.deleteMany({
+      userId: new ObjectId(userId),
+      readBy: new ObjectId(userId)
+    });
+
+    res.send({ 
+      success: true, 
+      message: `${result.deletedCount} read notifications cleared`,
+      totalCleared: result.deletedCount
+    });
+
+  } catch (err) {
+    console.error("❌ Clear notifications error:", err);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to clear notifications" 
+    });
+  }
+});
+
+// ===================================
+// GET WHO READ A NOTIFICATION (ADMIN/DEBUG)
+// ===================================
+app.get("/notifications/:id/read-by", async (req, res) => {
+  try {
+    const notificationId = req.params.id;
+
+    if (!ObjectId.isValid(notificationId)) {
+      return res.status(400).send({ success: false, error: "Invalid notification ID" });
+    }
+
+    // Get the notification
+    const notification = await notificationsCollection.findOne({ 
+      _id: new ObjectId(notificationId) 
+    });
+
+    if (!notification) {
+      return res.status(404).send({ 
+        success: false, 
+        error: "Notification not found" 
+      });
+    }
+
+    // If readBy is empty
+    if (!notification.readBy || notification.readBy.length === 0) {
+      return res.send({
+        success: true,
+        notificationId: notification._id,
+        message: notification.message,
+        totalReads: 0,
+        readBy: [],
+        readByUsers: []
+      });
+    }
+
+    // Get user details for each reader
+    const readByUsers = await userCollection.find({
+      _id: { $in: notification.readBy.map(id => new ObjectId(id)) }
+    }).toArray();
+
+    // Format response
+    const readers = readByUsers.map(user => ({
+      userId: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      photoURL: user.photoURL
+    }));
+
+    res.send({
+      success: true,
+      notificationId: notification._id,
+      message: notification.message,
+      assetId: notification.assetId,
+      date: notification.date,
+      totalReads: notification.readBy.length,
+      readBy: notification.readBy, // Array of user IDs
+      readByUsers: readers // Full user details
+    });
+
+  } catch (err) {
+    console.error("❌ Read-by fetch error:", err);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to fetch read status" 
+    });
+  }
+});
+
+// ===================================
+// GET ALL NOTIFICATIONS WITH READ STATUS (FOR HR ANALYTICS)
+// ===================================
+app.get("/notifications/company/:companyId/analytics", async (req, res) => {
+  try {
+    const companyId = req.params.companyId;
+
+    if (!ObjectId.isValid(companyId)) {
+      return res.status(400).send({ success: false, error: "Invalid company ID" });
+    }
+
+    // Get all notifications for this company
+    const notifications = await notificationsCollection.find({
+      companyId: companyId
+    }).sort({ date: -1 }).toArray();
+
+    // Enrich with read statistics
+    const enrichedNotifications = await Promise.all(
+      notifications.map(async (notif) => {
+        const totalReaders = notif.readBy?.length || 0;
+        
+        // Get reader details if any
+        let readers = [];
+        if (totalReaders > 0) {
+          const users = await userCollection.find({
+            _id: { $in: notif.readBy.map(id => new ObjectId(id)) }
+          }).toArray();
+
+          readers = users.map(u => ({
+            name: u.name,
+            email: u.email,
+            role: u.role
+          }));
+        }
+
+        return {
+          _id: notif._id,
+          message: notif.message,
+          date: notif.date,
+          notificationType: notif.notificationType,
+          totalReads: totalReaders,
+          readers: readers
+        };
+      })
+    );
+
+    // Calculate analytics
+    const totalNotifications = notifications.length;
+    const totalReads = notifications.reduce((sum, n) => sum + (n.readBy?.length || 0), 0);
+    const avgReadsPerNotification = totalNotifications > 0 ? (totalReads / totalNotifications).toFixed(2) : 0;
+
+    res.send({
+      success: true,
+      companyId: companyId,
+      analytics: {
+        totalNotifications,
+        totalReads,
+        avgReadsPerNotification,
+        unreadNotifications: notifications.filter(n => !n.readBy || n.readBy.length === 0).length
+      },
+      notifications: enrichedNotifications
+    });
+
+  } catch (err) {
+    console.error("❌ Analytics error:", err);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to fetch analytics" 
+    });
   }
 });
 
@@ -405,15 +755,17 @@ app.patch("/notifications/mark-all-read", async (req, res) => {
 
 
 
-
-
-
-
-    app.get("/assets", async (req, res) => {
+app.get("/assets", async (req, res) => {
   try {
     const filter = {};
+    
+    // Filter by companyId if provided
+    if (req.query.companyId) {
+      filter.companyId = req.query.companyId;
+    }
+    
     if (req.query.returnType) {
-      filter.returnType = req.query.returnType; // optional query filter
+      filter.returnType = req.query.returnType;
     }
 
     const result = await assetsCollection.find(filter).sort({ addedAt: -1 }).toArray();
@@ -423,6 +775,7 @@ app.patch("/notifications/mark-all-read", async (req, res) => {
     res.status(500).send({ success: false, error: "Failed to fetch assets" });
   }
 });
+
 
 const { ObjectId } = require('mongodb');
 
@@ -511,13 +864,31 @@ app.post("/requests", async (req, res) => {
 
 
 // Get requests by employee email
+// Get requests - filtered by companyId
 app.get("/requests", async (req, res) => {
   try {
-    const { employeeEmail } = req.query;
-    const filter = employeeEmail ? { employeeEmail } : {};
-    const result = await requestsCollection.find(filter).sort({ requestDate: -1 }).toArray();
+    const { employeeEmail, companyId } = req.query;
+    
+    let filter = {};
+    
+    // Filter by employee email (for employee dashboard)
+    if (employeeEmail) {
+      filter.employeeEmail = employeeEmail;
+    }
+    
+    // ✅ Filter by companyId (for HR dashboard)
+    if (companyId) {
+      filter.companyId = companyId;
+    }
+    
+    const result = await requestsCollection
+      .find(filter)
+      .sort({ requestDate: -1 })
+      .toArray();
+      
     res.send(result);
   } catch (error) {
+    console.error('Error fetching requests:', error);
     res.status(500).send({ error: "Failed to fetch requests" });
   }
 });
@@ -538,6 +909,8 @@ app.patch("/requests/:id", async (req, res) => {
 });
 
 // ✅ নতুন route - এখানে add করুন
+// ✅ Approve Request - Store HR's _id instead of email
+// ✅ Approve Request - WITH PACKAGE LIMIT CHECK
 app.patch("/requests/:id/approve", async (req, res) => {
   try {
     const requestId = req.params.id;
@@ -556,23 +929,46 @@ app.patch("/requests/:id/approve", async (req, res) => {
       return res.status(404).send({ success: false, message: "Employee not found" });
     }
 
-    // Get the asset to find HR's company email
+    // Get the asset to find company
     const asset = await assetsCollection.findOne({ _id: new ObjectId(request.assetId) });
     
     if (!asset) {
       return res.status(404).send({ success: false, message: "Asset not found" });
     }
 
-    const hrCompanyEmail = asset.companyEmail || asset.addedBy?.email;
+    // Find HR by companyId
+    const hr = await userCollection.findOne({ 
+      _id: new ObjectId(asset.companyId),
+      role: "hr" 
+    });
 
-    // ✅ Validation এখানে হবে - approve করার আগে
-    if (!hrCompanyEmail) {
-      return res.status(400).send({ 
+    if (!hr) {
+      return res.status(404).send({ 
         success: false, 
-        message: "Company email not found in asset" 
+        message: "HR not found for this company" 
       });
     }
 
+    console.log(`✅ Found HR: ${hr.name} (${hr._id})`);
+
+    // ✅ CHECK PACKAGE LIMIT BEFORE APPROVING
+    const currentEmployees = hr.currentEmployees || 0;
+    const packageLimit = hr.packageLimit || 5;
+
+    console.log(`📊 Current Employees: ${currentEmployees}, Package Limit: ${packageLimit}`);
+
+    if (currentEmployees >= packageLimit) {
+      return res.status(403).send({ 
+        success: false, 
+        limitReached: true,
+        message: `Package limit reached! You have ${currentEmployees}/${packageLimit} employees. Please upgrade your package to add more employees.`,
+        currentEmployees,
+        packageLimit
+      });
+    }
+
+    // ✅ Limit OK - Proceed with approval
+    
     // Update request status to approved
     await requestsCollection.updateOne(
       { _id: new ObjectId(requestId) },
@@ -584,26 +980,49 @@ app.patch("/requests/:id/approve", async (req, res) => {
       }
     );
 
-    // ✅ Add HR's company email to employee's affiliatedCompanies
+    // Add HR's _id to employee's affiliatedCompanies
     const updateResult = await userCollection.updateOne(
       { email: request.employeeEmail },
       { 
         $addToSet: { 
-          affiliatedCompanies: hrCompanyEmail 
+          affiliatedCompanies: hr._id.toString()
         }
       }
     );
 
-    // Optional: Decrease asset quantity by 1
+    // Decrease asset quantity by 1
     await assetsCollection.updateOne(
       { _id: new ObjectId(request.assetId) },
       { $inc: { quantity: -1 } }
     );
 
+    // ✅ Update HR's currentEmployees count
+    const newEmployeeCount = await userCollection.countDocuments({
+      role: "employee",
+      affiliatedCompanies: hr._id.toString()
+    });
+
+    await userCollection.updateOne(
+      { _id: hr._id },
+      { 
+        $set: { 
+          currentEmployees: newEmployeeCount,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    console.log(`✅ Employee count updated: ${currentEmployees} → ${newEmployeeCount}`);
+
     res.send({ 
       success: true, 
-      message: "Request approved and employee affiliated with company",
-      affiliationUpdated: updateResult.modifiedCount > 0
+      message: "Request approved successfully",
+      affiliationUpdated: updateResult.modifiedCount > 0,
+      hrId: hr._id,
+      hrName: hr.name,
+      companyName: hr.companyName,
+      currentEmployees: newEmployeeCount,
+      packageLimit: packageLimit
     });
 
   } catch (error) {
@@ -611,7 +1030,6 @@ app.patch("/requests/:id/approve", async (req, res) => {
     res.status(500).send({ success: false, error: "Failed to approve request" });
   }
 });
-
 
 
 
@@ -802,17 +1220,24 @@ const updateResult = await userCollection.updateOne(
 
 
 
+/// ===================================
+// GET EMPLOYEES BY COMPANY ID (for HR's team)
 // ===================================
-// GET ALL EMPLOYEES OF A COMPANY (FOR MY TEAM PAGE)
-// ===================================
-app.get("/employees/company/:hrEmail", async (req, res) => {
+app.get("/employees/company/:companyId", async (req, res) => {
   try {
-    const hrEmail = req.params.hrEmail;
+    const companyId = req.params.companyId;
 
-    // Find all employees affiliated with this HR
+    if (!ObjectId.isValid(companyId)) {
+      return res.status(400).send({ 
+        success: false, 
+        error: "Invalid company ID" 
+      });
+    }
+
+    // Find all employees affiliated with this company (HR's _id)
     const employees = await userCollection.find({
       role: "employee",
-      affiliatedCompanies: hrEmail
+      affiliatedCompanies: companyId
     }).toArray();
 
     res.send({ 

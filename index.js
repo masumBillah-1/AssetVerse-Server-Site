@@ -846,22 +846,85 @@ app.delete("/employees/:id", async (req, res) => {
 
 
 
-  // employee assets Request api 
-
-
+ // ===================================
+// 📌 ASSET REQUEST - Employee requests, HR gets notification
+// ===================================
 app.post("/requests", async (req, res) => {
   try {
     const requestData = req.body;
-    requestData.requestStatus = "pending";
-    requestData.requestDate = new Date();
 
-    const saved = await requestsCollection.insertOne(requestData);
-    res.send(saved);
+    // Find employee
+    const employee = await userCollection.findOne({ 
+      email: requestData.employeeEmail,
+      role: "employee"
+    });
+
+    if (!employee) {
+      return res.status(404).send({ 
+        success: false, 
+        error: "Employee not found" 
+      });
+    }
+
+    // Find asset to get company ID
+    const asset = await assetsCollection.findOne({ 
+      _id: new ObjectId(requestData.assetId) 
+    });
+
+    if (!asset) {
+      return res.status(404).send({ 
+        success: false, 
+        error: "Asset not found" 
+      });
+    }
+
+    const companyId = asset.companyId;
+
+    // Create request
+    const newRequest = {
+      ...requestData,
+      requestStatus: "pending",
+      requestDate: new Date(),
+      companyId: companyId
+    };
+
+    const result = await requestsCollection.insertOne(newRequest);
+
+    // ✅ NEW: Find HR and send notification
+    const hr = await userCollection.findOne({ 
+      _id: new ObjectId(companyId),
+      role: "hr" 
+    });
+
+    if (hr) {
+      // ✅ Create notification for HR
+      await notificationsCollection.insertOne({
+        userId: hr._id,
+        requestId: result.insertedId,
+        assetId: new ObjectId(requestData.assetId),
+        message: `${employee.name} requested asset: ${requestData.assetName}`,
+        date: new Date(),
+        readBy: [],
+        companyId: companyId,
+        notificationType: "asset_request"
+      });
+
+      console.log(`✅ Notification sent to HR: ${hr.name}`);
+    }
+
+    res.send({ 
+      success: true,
+      requestId: result.insertedId
+    });
+
   } catch (error) {
-    res.status(500).send({ error: "Failed to create request" });
+    console.error("❌ Request creation error:", error);
+    res.status(500).send({ 
+      success: false, 
+      error: "Failed to create request" 
+    });
   }
 });
-
 
 // Get requests by employee email
 // Get requests - filtered by companyId
@@ -1099,7 +1162,7 @@ app.post('/create-checkout-session', async (req, res) => {
         },
       ],
       mode: 'payment',
-      success_url: `http://localhost:5173/dashboard/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `http://localhost:5173/hr-dashboard/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `http://localhost:5173/dashboard/cancel`,
     });
     

@@ -139,6 +139,58 @@ async function run() {
         });
 
 
+  // ------------------------------
+    //   CHECK USER BY EMAIL
+    // ------------------------------
+
+
+
+app.get("/users/check", async (req, res) => {
+  try {
+    const email = req.query.email?.trim().toLowerCase();
+
+    console.log("🔍 Backend checking email:", email);
+
+    if (!email) {
+      return res.status(400).json({ 
+        found: false, 
+        error: "Email parameter is required" 
+      });
+    }
+
+    const user = await userCollection.findOne({
+      email: { $regex: `^${email}$`, $options: "i" }
+    });
+
+    console.log("📊 User found:", user ? "Yes" : "No");
+
+    if (user) {
+      // ✅ Only return necessary user info
+      res.json({ 
+        found: true, 
+        user: {
+          _id: user._id,
+          email: user.email,
+          name: user.name,
+          role: user.role || "", // Empty string if role not set
+          photoURL: user.photoURL || "",
+          companyName: user.companyName || "",
+          dateOfBirth: user.dateOfBirth || "",
+          createdAt: user.createdAt
+        }
+      });
+    } else {
+      res.json({ found: false });
+    }
+  } catch (err) {
+    console.error("❌ Check user error:", err);
+    res.status(500).json({ 
+      found: false, 
+      error: "Server error" 
+    });
+  }
+});
+
 
    // server-এ subscription ফেরত দেওয়ার API  
 
@@ -166,34 +218,8 @@ async function run() {
 
 
 
-    // ------------------------------
-    //   GET ALL USERS
-    // ------------------------------
-    app.get('/users', async (req, res) => {
-      const result = await userCollection.find().toArray();
-      res.send(result);
-    });
 
-    // ------------------------------
-    //   CHECK USER BY EMAIL
-    // ------------------------------
-    app.get("/users/check", async (req, res) => {
-      try {
-        const email = req.query.email;
-        const user = await userCollection.findOne({ email });
-
-        if (user) {
-          return res.json({ found: true, user });
-        } else {
-          return res.json({ found: false });
-        }
-      } catch (err) {
-        console.log(err);
-        res.json({ found: false });
-      }
-    });
-
-
+  
         // my team member api 
 
         // ===================================
@@ -282,43 +308,44 @@ app.post("/assets", async (req, res) => {
         name: user.name,
         email: user.email,
       },
-      companyId: companyId // ✅ Store company ID instead of email
+      companyId: companyId
     };
 
     // Insert asset
     const result = await assetsCollection.insertOne(newAsset);
 
-    // ✅ Find ALL users in the same company
-    let companyMembers = [];
+    // ✅ FIXED: Send notifications ONLY to OTHER company members
+    let notificationRecipients = [];
     
     if (user.role === "hr") {
-      // HR হলে: HR নিজে + তার সব employees
+      // ✅ HR asset add করলে: শুধু Employees notification পাবে (HR নিজে পাবে না)
       const employees = await userCollection.find({
         role: "employee",
         affiliatedCompanies: user._id.toString()
       }).toArray();
 
-      companyMembers = [user, ...employees]; // HR + employees
+      notificationRecipients = employees; // শুধু employees
+      console.log(`✅ HR added asset - notifying ${employees.length} employees`);
       
     } else if (user.role === "employee") {
-      // Employee হলে: সেই company এর HR + সব employees
+      // ✅ Employee asset add করলে: HR + Other employees notification পাবে (নিজে পাবে না)
       const hr = await userCollection.findOne({ 
         _id: new ObjectId(companyId),
         role: "hr" 
       });
 
-      const employees = await userCollection.find({
+      const otherEmployees = await userCollection.find({
         role: "employee",
-        affiliatedCompanies: companyId
+        affiliatedCompanies: companyId,
+        _id: { $ne: user._id } // ✅ নিজেকে বাদ দিয়ে
       }).toArray();
 
-      companyMembers = hr ? [hr, ...employees] : employees;
+      notificationRecipients = hr ? [hr, ...otherEmployees] : otherEmployees;
+      console.log(`✅ Employee added asset - notifying HR + ${otherEmployees.length} other employees`);
     }
 
-    console.log(`✅ Found ${companyMembers.length} members in company: ${companyId}`);
-
-    // ✅ প্রতিটি company member এর জন্য আলাদা notification
-    const notifications = companyMembers.map(member => ({
+    // ✅ Create notifications for recipients only
+    const notifications = notificationRecipients.map(member => ({
       userId: member._id,
       assetId: result.insertedId,
       message: `${user.name} added a new asset: ${newAsset.assetName}`,
@@ -328,10 +355,10 @@ app.post("/assets", async (req, res) => {
       notificationType: "asset_added"
     }));
 
-    // ✅ সব notifications insert করুন
+    // ✅ Insert notifications
     if (notifications.length > 0) {
       await notificationsCollection.insertMany(notifications);
-      console.log(`✅ Created ${notifications.length} notifications for company: ${companyId}`);
+      console.log(`✅ Created ${notifications.length} notifications`);
     }
 
     res.send({ 
@@ -346,6 +373,8 @@ app.post("/assets", async (req, res) => {
     res.status(500).send({ success: false, error: "Failed to add asset" });
   }
 });
+
+
 
 
 // notifications  api 
@@ -679,32 +708,60 @@ app.get("/notifications/:id/read-by", async (req, res) => {
 // ===================================
 // GET ALL NOTIFICATIONS WITH READ STATUS (FOR HR ANALYTICS)
 // ===================================
+// ===================================
+// 🔍 NOTIFICATION ANALYTICS (HR DASHBOARD)
+// ===================================
 app.get("/notifications/company/:companyId/analytics", async (req, res) => {
   try {
     const companyId = req.params.companyId;
 
     if (!ObjectId.isValid(companyId)) {
-      return res.status(400).send({ success: false, error: "Invalid company ID" });
+      return res.status(400).send({
+        success: false,
+        error: "Invalid company ID"
+      });
     }
 
-    // Get all notifications for this company
-    const notifications = await notificationsCollection.find({
-      companyId: companyId
-    }).sort({ date: -1 }).toArray();
+    // 🔹 All notifications of this company
+    const notifications = await notificationsCollection
+      .find({ companyId })
+      .sort({ date: -1 })
+      .toArray();
 
-    // Enrich with read statistics
+    // 🔹 Total company users (HR + Employees)
+    const totalCompanyUsers = await userCollection.countDocuments({
+      $or: [
+        { _id: new ObjectId(companyId), role: "hr" },
+        { affiliatedCompanies: companyId, role: "employee" }
+      ]
+    });
+
+    let totalReads = 0;
+    let unreadNotifications = 0;
+    const typeStats = {};
+
     const enrichedNotifications = await Promise.all(
       notifications.map(async (notif) => {
-        const totalReaders = notif.readBy?.length || 0;
-        
-        // Get reader details if any
+        const readByIds = notif.readBy || [];
+        const totalReaders = readByIds.length;
+        const unreadCount = Math.max(totalCompanyUsers - totalReaders, 0);
+
+        totalReads += totalReaders;
+        if (totalReaders === 0) unreadNotifications++;
+
+        // 🔹 Count notification types
+        typeStats[notif.notificationType] =
+          (typeStats[notif.notificationType] || 0) + 1;
+
+        // 🔹 Reader details
         let readers = [];
-        if (totalReaders > 0) {
-          const users = await userCollection.find({
-            _id: { $in: notif.readBy.map(id => new ObjectId(id)) }
-          }).toArray();
+        if (readByIds.length > 0) {
+          const users = await userCollection
+            .find({ _id: { $in: readByIds.map(id => new ObjectId(id)) } })
+            .toArray();
 
           readers = users.map(u => ({
+            userId: u._id,
             name: u.name,
             email: u.email,
             role: u.role
@@ -714,36 +771,41 @@ app.get("/notifications/company/:companyId/analytics", async (req, res) => {
         return {
           _id: notif._id,
           message: notif.message,
-          date: notif.date,
           notificationType: notif.notificationType,
+          assetId: notif.assetId || null,      // ✅ ADDED
+          requestId: notif.requestId || null,  // ✅ ADDED
+          date: notif.date,
           totalReads: totalReaders,
-          readers: readers
+          unreadCount,                         // ✅ ADDED
+          readers
         };
       })
     );
 
-    // Calculate analytics
     const totalNotifications = notifications.length;
-    const totalReads = notifications.reduce((sum, n) => sum + (n.readBy?.length || 0), 0);
-    const avgReadsPerNotification = totalNotifications > 0 ? (totalReads / totalNotifications).toFixed(2) : 0;
+    const avgReadsPerNotification =
+      totalNotifications > 0
+        ? (totalReads / totalNotifications).toFixed(2)
+        : 0;
 
     res.send({
       success: true,
-      companyId: companyId,
+      companyId,
       analytics: {
         totalNotifications,
         totalReads,
         avgReadsPerNotification,
-        unreadNotifications: notifications.filter(n => !n.readBy || n.readBy.length === 0).length
+        unreadNotifications,
+        typeStats                       // ✅ ADDED
       },
       notifications: enrichedNotifications
     });
 
-  } catch (err) {
-    console.error("❌ Analytics error:", err);
-    res.status(500).send({ 
-      success: false, 
-      error: "Failed to fetch analytics" 
+  } catch (error) {
+    console.error("❌ Notification analytics error:", error);
+    res.status(500).send({
+      success: false,
+      error: "Failed to fetch notification analytics"
     });
   }
 });
@@ -890,16 +952,16 @@ app.post("/requests", async (req, res) => {
 
     const result = await requestsCollection.insertOne(newRequest);
 
-    // ✅ NEW: Find HR and send notification
+    // ✅ FIXED: Send notification ONLY to HR (NOT to employee who made the request)
     const hr = await userCollection.findOne({ 
       _id: new ObjectId(companyId),
       role: "hr" 
     });
 
     if (hr) {
-      // ✅ Create notification for HR
+      // ✅ Create notification শুধু HR এর জন্য
       await notificationsCollection.insertOne({
-        userId: hr._id,
+        userId: hr._id, // শুধু HR
         requestId: result.insertedId,
         assetId: new ObjectId(requestData.assetId),
         message: `${employee.name} requested asset: ${requestData.assetName}`,
@@ -909,7 +971,7 @@ app.post("/requests", async (req, res) => {
         notificationType: "asset_request"
       });
 
-      console.log(`✅ Notification sent to HR: ${hr.name}`);
+      console.log(`✅ Request notification sent to HR: ${hr.name} (Employee ${employee.name} will NOT get notification)`);
     }
 
     res.send({ 

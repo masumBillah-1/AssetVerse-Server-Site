@@ -12,7 +12,7 @@
 
 ## 📌 Project Purpose
 
-AssetVerse Server is the **backend API** for a B2B Corporate Asset Management System.  
+AssetVerse Server is the **backend API** for a B2B Corporate Asset  Management System.  
 It handles authentication, role-based authorization, asset management, employee affiliation, request processing, package enforcement, and Stripe payment integration.
 
 ---
